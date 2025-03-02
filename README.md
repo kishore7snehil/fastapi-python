@@ -1,4 +1,5 @@
 The Auth0 FastAPI SDK is a library for implementing user authentication in FastAPI applications.
+
 ![Release](https://img.shields.io/pypi/v/auth0-python)
 [![Codecov](https://img.shields.io/codecov/c/github/auth0/auth0-python)](https://codecov.io/gh/auth0/auth0-python)
 ![Downloads](https://img.shields.io/pypi/dw/auth0-python)
@@ -15,9 +16,7 @@ Learn how to integrate Auth0 with Fast API.
 - [Docs site](https://www.auth0.com/docs) - explore our docs site and learn more about Auth0.
 
 
-# Auth0 AI
-
-This package provides base methods to use Auth0 with your AI use cases.
+## Getting Started
 
 ## Installation
 
