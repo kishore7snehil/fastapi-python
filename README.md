@@ -11,7 +11,6 @@ The Auth0 FastAPI SDK is a library for implementing user authentication in FastA
 </div>
 
 
-Learn how to integrate Auth0 with Fast API.
 ## Documentation
 - [Docs site](https://www.auth0.com/docs) - explore our docs site and learn more about Auth0.
 
