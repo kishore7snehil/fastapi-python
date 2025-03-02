@@ -1,0 +1,16 @@
+### Python ###
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+#Environments
+.env
+.venv
+env/
+
+#Session Cache
+.sessions_cache
+
+#testfile
+server.py
