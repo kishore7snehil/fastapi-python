@@ -1,10 +1,11 @@
 from __future__ import annotations
-from typing import Any
+from typing import Any,Optional
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, Header
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from authlib.integrations.starlette_client import OAuthError
+from encryption.validator import Auth0JWTBearerTokenValidator
 import jwt
 import time
 
@@ -44,3 +45,23 @@ def setup_routes(app, auth_client: Any) -> None:
         logoutUrl = await auth_client.logout(request, response)
 
         return RedirectResponse(url=logoutUrl)
+    
+
+    @app.get("/connect")
+    async def connect(
+        connection: str,
+        request: Request,
+        authorization: Optional[str] = Header(None)
+    ):
+        claims = None
+
+        if authorization:
+            # This means the request is coming from an SPA (token in header)
+            claims = await Auth0JWTBearerTokenValidator.validate_access_token(auth_client, authorization)
+        else:
+            # This means the request comes from a web app flow (session stored token)
+            claims = Auth0JWTBearerTokenValidator.validate_store_token(auth_client, request)
+
+        # Now that the user is authenticated — proceed to the actual connection logic.
+
+        return {"message": "Connection successful", "user": claims.get("sub")}

@@ -1,9 +1,10 @@
 """
-Custom error classes for auth0-fastapi.
+Error classes for the auth0-server-python SDK.
+These exceptions provide specific error types for different failure scenarios.
 """
 
 class Auth0Error(Exception):
-    """Base class for all Auth0 errors."""
+    """Base class for all Auth0 SDK errors."""
     
     def __init__(self, message=None):
         self.message = message
@@ -78,29 +79,16 @@ class BackchannelLogoutError(Auth0Error):
         self.name = "BackchannelLogoutError"
 
 
-class ConfigurationError(Auth0Error):
-    """
-    Error raised when there's an issue with the Auth0 configuration.
-    """
-    code = "configuration_error"
+class AccessTokenForConnectionError(Auth0Error):
+    """Error when retrieving access tokens for a specific connection fails."""
     
-    def __init__(self, message: str):
+    def __init__(self, code: str, message: str):
         super().__init__(message)
-        self.name = "ConfigurationError"
+        self.code = code
+        self.name = "AccessTokenForConnectionError"
 
 
-class StoreOptionsError(Auth0Error):
-    """
-    Error raised when store options are missing or invalid.
-    """
-    code = "store_options_error"
-    
-    def __init__(self, message: str = "Request and Response objects are required in store options"):
-        super().__init__(message)
-        self.name = "StoreOptionsError"
-
-
-# Error code enumerations for consistent error handling
+# Error code enumerations - these can be used to identify specific error scenarios
 
 class AccessTokenErrorCode:
     """Error codes for access token operations."""

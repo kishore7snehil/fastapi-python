@@ -1,5 +1,4 @@
-from .auth_client import Auth
-from .base import BaseAuth
+from .auth_client import Auth0
 
 
-__all__ = ["Auth", "BaseAuth"]
+__all__ = ["Auth0"]
