@@ -61,14 +61,11 @@ class MemoryStateStore(MemoryStore, StateStore):
         Args:
             identifier: Unique key for the stored data
             state: StateData object to store
-            remove_if_expires: Whether to automatically remove on expiration
             options: Additional operation-specific options
         """
-        # Calculate expiration timestamp based on current time + duration
-        expiration = int(time.time()) + self._absolute_duration
         
         # Encrypt the state data before storing
-        encrypted_value = await self.encrypt(identifier, state.dict(), expiration)
+        encrypted_value = self.encrypt(identifier, state.dict())
         
         # Store the encrypted data
         self._data[identifier] = encrypted_value
@@ -96,7 +93,7 @@ class MemoryStateStore(MemoryStore, StateStore):
         
         try:
             # Decrypt and convert back to StateData object
-            decrypted_data = await self.decrypt(identifier, encrypted_value)
+            decrypted_data = self.decrypt(identifier, encrypted_value)
             return StateData.parse_obj(decrypted_data)
         except Exception:
             # If decryption fails (e.g., expired), remove the entry

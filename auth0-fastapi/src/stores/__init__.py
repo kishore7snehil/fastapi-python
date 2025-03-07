@@ -3,15 +3,12 @@ Store implementations for auth0-fastapi.
 These stores adapt the core auth0-server-python stores to work with FastAPI.
 """
 
-from .abstract import FastAPISessionStore, FastAPITransactionStore
-from .stateless import StatelessSessionStore
-from .stateful import StatefulSessionStore
-from .cookie_transaction import CookieTransactionStore
+from .cookie_transaction_store import CookieTransactionStore
+from .stateful_state_store import StatefulStateStore
+from .stateless_state_store import StatelessStateStore
 
 __all__ = [
-    'FastAPISessionStore',
-    'FastAPITransactionStore',
-    'StatelessSessionStore',
-    'StatefulSessionStore',
-    'CookieTransactionStore'
+    "CookieTransactionStore",
+    "StatefulStateStore",
+    "StatelessStateStore"
 ]

@@ -19,6 +19,7 @@ from authlib.jose import jwt
 from pydantic import BaseModel, ValidationError
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
+from fastapi import Request, Response
 
 from error import (
     MissingTransactionError, 
@@ -26,7 +27,10 @@ from error import (
     MissingRequiredArgumentError,
     BackchannelLogoutError,
     AccessTokenError,
-    AccessTokenErrorCode
+    AccessTokenForConnectionError,
+    AccessTokenErrorCode,
+    AccessTokenForConnectionErrorCode
+    
 )
 from auth_types import (
     StateData, 
@@ -34,11 +38,12 @@ from auth_types import (
     UserClaims, 
     TokenSet,
     LogoutTokenClaims,
-    ServerClientOptionsWithSecret,
     StartInteractiveLoginOptions,
     LoginBackchannelOptions,
+    AccessTokenForConnectionOptions,
     LogoutOptions
 )
+from utils import update_state_data_for_connection_token_set,update_state_data
 from store.memory import MemoryStateStore, MemoryTransactionStore
 
 # Generic type for store options
@@ -103,6 +108,7 @@ class ServerClient(Generic[TStoreOptions]):
             server_metadata_url=f"https://{domain}/.well-known/openid-configuration",
             client_id=client_id,
             client_secret=client_secret,
+            authorize_url=f"https://{domain}/authorize",
             client_kwargs={
                 "scope": "openid profile email",
                 "token_endpoint_auth_method": "client_secret_post"
@@ -110,8 +116,10 @@ class ServerClient(Generic[TStoreOptions]):
         )
     
     async def start_interactive_login(
-        self, 
-        options: Optional[StartInteractiveLoginOptions] = None
+        self,
+        options: Optional[StartInteractiveLoginOptions] = None,
+        request: Request = None,
+        store_options: dict = None
     ) -> str:
         """
         Starts the interactive login process and returns a URL to redirect to.
@@ -154,24 +162,34 @@ class ServerClient(Generic[TStoreOptions]):
             code_verifier=code_verifier,
             app_state=options.app_state
         )
-        
+
         # Store the transaction data
         await self._transaction_store.set(
             f"{self._transaction_identifier}:{state}", 
             transaction_data,
-            True
+            options=store_options
         )
-        
+
         # Generate the authorization URL
-        auth_client = self._oauth.create_client("auth0")
-        auth_url = auth_client.authorize_redirect(None, **auth_params)
-        
-        return auth_url
+        auth_client = self._oauth.auth0
+        redirect_response = await auth_client.authorize_redirect(request, **auth_params)
+
+        # If store_options contains a Response with Set-Cookie header, merge it
+        if store_options and "response" in store_options:
+            store_response = store_options["response"]
+            # Check if there is a Set-Cookie header in the store_response
+            cookie = store_response.headers.get("set-cookie")
+            if cookie:
+                # Append the Set-Cookie header to the redirect_response
+                redirect_response.headers.append("set-cookie", cookie)
+
+        return redirect_response
     
     async def complete_interactive_login(
         self, 
-        url: str, 
-        store_options: Optional[Dict[str, Any]] = None
+        url: str,
+        request: Request = None,  
+        store_options: dict = None
     ) -> Dict[str, Any]:
         """
         Completes the login process after user is redirected back.
@@ -194,7 +212,7 @@ class ServerClient(Generic[TStoreOptions]):
         
         # Retrieve the transaction data using the state
         transaction_identifier = f"{self._transaction_identifier}:{state}"
-        transaction_data = await self._transaction_store.get(transaction_identifier, store_options)
+        transaction_data = await self._transaction_store.get(transaction_identifier, options=store_options)
         
         if not transaction_data:
             raise MissingTransactionError()
@@ -212,69 +230,257 @@ class ServerClient(Generic[TStoreOptions]):
         
         # Exchange the code for tokens
         try:
-            auth_client = self._oauth.create_client("auth0")
-            token_response = await auth_client.fetch_token(
-                code=code,
+            auth_client = self._oauth.auth0
+            token_response = await auth_client.authorize_access_token(
+                request,
                 code_verifier=transaction_data.code_verifier
             )
         except OAuthError as e:
             raise ApiError("token_error", str(e), e)
         
-        # Parse and validate the ID token
-        id_token = token_response.get("id_token")
-        claims = None
-        if id_token:
-            claims = jwt.decode(id_token, options={"verify_signature": False})
-            # In a production implementation, we should verify the token signature
-            # and validate claims like audience, issuer, etc.
-        
-        # Extract user information
+       # Use the userinfo field from the token_response for user claims
+        user_info = token_response.get("userinfo")
         user_claims = None
-        if claims:
-            user_claims = UserClaims.parse_obj(claims)
+        if user_info:
+            user_claims = UserClaims.parse_obj(user_info)
+        else:
+            # Alternatively, decode id_token if needed (not recommended if userinfo is available)
+            id_token = token_response.get("id_token")
+            if id_token:
+                # Note: For production, properly verify the token
+                user_claims = UserClaims.parse_obj(jwt.decode(id_token, key=None, claims_options={"verify_signature": False}))
         
-        # Build state data to store
-        sid = claims.get("sid") if claims else self._generate_random_string(32)
+        # Build a token set using the token response data
+        token_set = TokenSet(
+            audience=token_response.get("audience", "default"),
+            access_token=token_response.get("access_token", ""),
+            scope=token_response.get("scope", ""),
+            expires_at=int(time.time()) + token_response.get("expires_in", 3600)
+        )
         
+        # Generate a session id (sid) from token_response or transaction data, or create a new one
+        sid = user_info.get("sid") if user_info and "sid" in user_info else self._generate_random_string(32)
+        
+        # Construct state data to represent the session
         state_data = StateData(
             user=user_claims,
-            id_token=id_token,
-            refresh_token=token_response.get("refresh_token"),
-            token_sets=[
-                TokenSet(
-                    audience=token_response.get("audience", "default"),
-                    access_token=token_response.get("access_token", ""),
-                    scope=token_response.get("scope", ""),
-                    expires_at=int(time.time()) + token_response.get("expires_in", 3600)
-                )
-            ],
+            id_token=token_response.get("id_token"),
+            refresh_token=token_response.get("refresh_token"),  # might be None if not provided
+            token_sets=[token_set],
             internal={
                 "sid": sid,
                 "created_at": int(time.time())
             }
         )
         
-        # Store the state data
-        await self._state_store.set(
-            self._state_identifier, 
-            state_data,
-            True, 
-            store_options
-        )
+        # Store the state data in the state store using store_options (Response required)
+        await self._state_store.set(self._state_identifier, state_data, options=store_options)
         
-        # Clean up transaction data
-        await self._transaction_store.delete(transaction_identifier, store_options)
+        # Clean up transaction data after successful login
+        await self._transaction_store.delete(transaction_identifier, options=store_options)
         
-        # Return the result with app state if provided
-        result = {
-            "state_data": state_data.dict(),
-        }
-        
+        result = {"state_data": state_data.dict()}
         if transaction_data.app_state:
             result["app_state"] = transaction_data.app_state
             
-        return result
+        return result    
+
     
+    async def login_backchannel(
+        self,
+        options: LoginBackchannelOptions,
+        store_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Logs in using Client-Initiated Backchannel Authentication.
+        
+        Note:
+            Using Client-Initiated Backchannel Authentication requires the feature 
+            to be enabled in the Auth0 dashboard.
+        
+        See:
+            https://auth0.com/docs/get-started/authentication-and-authorization-flow/client-initiated-backchannel-authentication-flow
+        
+        Args:
+            options: Options used to configure the backchannel login process.
+            store_options: Optional options used to pass to the Transaction and State Store.
+            
+        Returns:
+            A dictionary containing the authorizationDetails (when RAR was used).
+        """
+        token_endpoint_response = await self._auth_client.backchannel_authentication({
+            "binding_message": options.binding_message,
+            "login_hint": options.login_hint,
+            "authorization_params": options.authorization_params,
+        })
+        
+        existing_state_data = await self._state_store.get(self._state_identifier, store_options)
+        
+        audience = getattr(self._options.get("authorization_params", {}), "audience", "default")
+        state_data = update_state_data(
+            audience,
+            existing_state_data,
+            token_endpoint_response
+        )
+        
+        await self._state_store.set(self._state_identifier, state_data, True, store_options)
+        
+        return {
+            "authorization_details": token_endpoint_response.get("authorization_details")
+        }
+
+    async def get_user(self, store_options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """
+        Retrieves the user from the store, or None if no user found.
+        
+        Args:
+            store_options: Optional options used to pass to the Transaction and State Store.
+            
+        Returns:
+            The user, or None if no user found in the store.
+        """
+        state_data = await self._state_store.get(self._state_identifier, store_options)
+        
+        if state_data:
+            return state_data.get("user")
+        
+        return None
+
+    async def get_session(self, store_options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve the user session from the store, or None if no session found.
+        
+        Args:
+            store_options: Optional options used to pass to the Transaction and State Store.
+            
+        Returns:
+            The session, or None if no session found in the store.
+        """
+        state_data = await self._state_store.get(self._state_identifier, store_options)
+        
+        if state_data:
+            # Create a copy and remove internal data
+            session_data = {k: v for k, v in state_data.items() if k != "internal"}
+            return session_data
+        
+        return None
+
+    async def get_access_token(self, store_options: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Retrieves the access token from the store, or calls Auth0 when the access token 
+        is expired and a refresh token is available in the store.
+        Also updates the store when a new token was retrieved from Auth0.
+        
+        Args:
+            store_options: Optional options used to pass to the Transaction and State Store.
+            
+        Returns:
+            The access token, retrieved from the store or Auth0.
+            
+        Raises:
+            AccessTokenError: If the token is expired and no refresh token is available.
+        """
+        state_data = await self._state_store.get(self._state_identifier, store_options)
+        
+        # Get audience and scope from options or use defaults
+        auth_params = getattr(self._options, "authorization_params", {}) or {}
+        audience = auth_params.get("audience", "default")
+        scope = auth_params.get("scope")
+        
+        # Find matching token set
+        token_set = None
+        if state_data and state_data.get("token_sets"):
+            for ts in state_data["token_sets"]:
+                if ts.get("audience") == audience and (not scope or ts.get("scope") == scope):
+                    token_set = ts
+                    break
+        
+        # If token is valid, return it
+        if token_set and token_set.get("expires_at", 0) > time.time():
+            return token_set["access_token"]
+        
+        # Check for refresh token
+        if not state_data or not state_data.get("refresh_token"):
+            raise AccessTokenError(
+                AccessTokenErrorCode.MISSING_REFRESH_TOKEN,
+                "The access token has expired and a refresh token was not provided. The user needs to re-authenticate."
+            )
+        
+        # Get new token with refresh token
+        token_endpoint_response = await self._auth_client.get_token_by_refresh_token({
+            "refresh_token": state_data["refresh_token"]
+        })
+        
+        # Update state data with new token
+        existing_state_data = await self._state_store.get(self._state_identifier, store_options)
+        updated_state_data = update_state_data(audience, existing_state_data, token_endpoint_response)
+        
+        # Store updated state
+        await self._state_store.set(self._state_identifier, updated_state_data, False, store_options)
+        
+        return token_endpoint_response["access_token"]
+
+    async def get_access_token_for_connection(
+        self,
+        options: AccessTokenForConnectionOptions,
+        store_options: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Retrieves an access token for a connection.
+        
+        This method attempts to obtain an access token for a specified connection.
+        It first checks if a refresh token exists in the store.
+        If no refresh token is found, it throws an `AccessTokenForConnectionError` indicating
+        that the refresh token was not found.
+        
+        Args:
+            options: Options for retrieving an access token for a connection.
+            store_options: Optional options used to pass to the Transaction and State Store.
+            
+        Returns:
+            The access token for the connection
+            
+        Raises:
+            AccessTokenForConnectionError: If the access token was not found or 
+                there was an issue requesting the access token.
+        """
+        state_data = await self._state_store.get(self._state_identifier, store_options)
+        
+        # Find existing connection token
+        connection_token_set = None
+        if state_data and state_data.get("connection_token_sets"):
+            for ts in state_data["connection_token_sets"]:
+                if ts.get("connection") == options.connection:
+                    connection_token_set = ts
+                    break
+        
+        # If token is valid, return it
+        if connection_token_set and connection_token_set.get("expires_at", 0) > time.time():
+            return connection_token_set["access_token"]
+        
+        # Check for refresh token
+        if not state_data or not state_data.get("refresh_token"):
+            raise AccessTokenForConnectionError(
+                AccessTokenForConnectionErrorCode.MISSING_REFRESH_TOKEN,
+                "A refresh token was not found but is required to be able to retrieve an access token for a connection."
+            )
+        
+        # Get new token for connection
+        token_endpoint_response = await self._auth_client.get_token_for_connection({
+            "connection": options.connection,
+            "login_hint": options.login_hint,
+            "refresh_token": state_data["refresh_token"]
+        })
+        
+        # Update state data with new token
+        updated_state_data = update_state_data_for_connection_token_set(options, state_data, token_endpoint_response)
+        
+        # Store updated state
+        await self._state_store.set(self._state_identifier, updated_state_data, False, store_options)
+        
+        return token_endpoint_response["access_token"]
+    
+
     async def logout(
         self, 
         options: Optional[LogoutOptions] = None,
@@ -346,81 +552,18 @@ class ServerClient(Generic[TStoreOptions]):
         except (jwt.JoseError, ValidationError) as e:
             raise BackchannelLogoutError(f"Error processing logout token: {str(e)}")
     
-    async def get_user_info(
-        self, 
-        store_options: Optional[Dict[str, Any]] = None
-    ) -> Optional[UserClaims]:
-        """
-        Gets the current user information from the session.
-        
-        Args:
-            store_options: Options to pass to the state store
-            
-        Returns:
-            User claims or None if no session exists
-        """
-        state_data = await self._state_store.get(self._state_identifier, store_options)
-        if not state_data or not state_data.user:
-            return None
-        
-        return state_data.user
+ # Helper methods
+    def _generate_random_string(self, length: int = 64) -> str:
+        """Generate a random string of the specified length."""
+        alphabet = string.ascii_letters + string.digits
+        return ''.join(secrets.choice(alphabet) for _ in range(length))
     
-    async def get_access_token(
-        self, 
-        audience: Optional[str] = None,
-        scope: Optional[str] = None,
-        store_options: Optional[Dict[str, Any]] = None
-    ) -> Optional[str]:
-        """
-        Gets an access token for the specified audience and scope.
-        
-        Args:
-            audience: The API audience for the token
-            scope: The requested scope
-            store_options: Options to pass to the state store
-            
-        Returns:
-            Access token or None if no matching token exists
-        """
-        state_data = await self._state_store.get(self._state_identifier, store_options)
-        if not state_data:
-            raise AccessTokenError(AccessTokenErrorCode.MISSING_SESSION, "No session found")
-        
-        # Default audience if not specified
-        audience = audience or "default"
-        
-        # Look for an existing token that matches the criteria
-        for token_set in state_data.token_sets:
-            if token_set.audience == audience:
-                # Check if token is expired
-                if token_set.expires_at <= int(time.time()):
-                    # Need to refresh the token
-                    if not state_data.refresh_token:
-                        raise AccessTokenError(
-                            AccessTokenErrorCode.MISSING_REFRESH_TOKEN, 
-                            "No refresh token available"
-                        )
-                    
-                    # Refresh the token (implementation would go here)
-                    # For now, we'll just raise an error
-                    raise AccessTokenError(
-                        AccessTokenErrorCode.FAILED_TO_REFRESH_TOKEN,
-                        "Token refresh not implemented in this example"
-                    )
-                
-                # Token is valid, return it
-                return token_set.access_token
-        
-        # No matching token found, try to get a new one if we have a refresh token
-        if not state_data.refresh_token:
-            raise AccessTokenError(
-                AccessTokenErrorCode.MISSING_REFRESH_TOKEN,
-                "No refresh token available"
-            )
-        
-        # Request a new token (implementation would go here)
-        # For now, we'll just raise an error
-        raise AccessTokenError(
-            AccessTokenErrorCode.FAILED_TO_REQUEST_TOKEN,
-            "Requesting new tokens not implemented in this example"
-        )
+    def _generate_code_verifier(self) -> str:
+        """Generate a PKCE code verifier."""
+        return self._generate_random_string(64)
+    
+    def _generate_code_challenge(self, code_verifier: str) -> str:
+        """Generate a PKCE code challenge from a code verifier."""
+        code_challenge_digest = hashlib.sha256(code_verifier.encode()).digest()
+        code_challenge = base64.urlsafe_b64encode(code_challenge_digest).decode('utf-8')
+        return code_challenge.rstrip('=')

@@ -1,47 +1,73 @@
-import os
-import time
-from typing import Dict, Any, Union
-from cryptography.hazmat.primitives import hashes
+from __future__ import annotations
+from typing import Any
+
+import json
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from authlib.jose import jwt
-from authlib.jose.errors import JoseError
+from cryptography.hazmat.primitives import hashes
+from jwcrypto import jwk, jwe
+from jwcrypto.common import base64url_encode
+
+# Constants equivalent to the TypeScript version
+ENC = 'A256CBC-HS512'
+ALG = 'dir'
+DIGEST = hashes.SHA256()
+BYTE_LENGTH = 64
+ENCRYPTION_INFO = b'Auth0 Generated ryption'
 
 
-def derive_encryption_secret(secret: str, salt: str) -> bytes:
-    """Derive an encryption key using HKDF."""
-    encoder = lambda s: s.encode("utf-8")
-    key = HKDF(
-        algorithm=hashes.SHA256(),
-        length=64,
-        salt=encoder(salt),
-        info=encoder("derived cookie encryption secret"),
-    ).derive(encoder(secret))
-    
-    return key
 
+def derive_encryption_key(secret: bytes, salt: bytes) -> bytes:
+    """
+    Derives a key using HKDF with SHA-256.
+    """
+    hkdf = HKDF(
+        algorithm=DIGEST,
+        length=BYTE_LENGTH,
+        salt=salt,
+        info=ENCRYPTION_INFO,
+    )
+    return hkdf.derive(secret)
 
-def encrypt(payload: Dict[str, Any], secret: str, salt: str) -> str:
-    """Encrypt payload using JWE."""
-    encryption_secret = derive_encryption_secret(secret, salt)
-    
-    # Use authlib to encrypt
-    header = {"alg": "A256KW", "enc": "A256GCM"}
-    jwe = jwt.encode(header, payload, encryption_secret)
-    return jwe.decode("utf-8")
+def encrypt(payload: dict, secret: str, salt: str) -> str:
+    """
+    Encrypts the given payload into a JWE using the direct algorithm and A256CBC-HS512 encryption.
+    """
+    # Convert secret and salt to bytes
+    secret_bytes = secret.encode('utf-8')
+    salt_bytes = salt.encode('utf-8')
+        
+    # Derive the encryption key
+    encryption_secret = derive_encryption_key(secret_bytes, salt_bytes)
+        
+    # Create a symmetric key for JWE. jwcrypto expects the key as a base64url-encoded string.
+    key = jwk.JWK(k=base64url_encode(encryption_secret), kty="oct")
+        
+    payload_json = json.dumps(payload)
+        
+    # Create a JWE object with the specified header
+    jwetoken = jwe.JWE(
+        payload_json,
+        protected={'alg': ALG, 'enc': ENC}
+    )
 
+    jwetoken.add_recipient(key)
+    c = jwetoken.serialize(compact=True)
+        
+    # Return the compact serialization of the token
+    return jwetoken.serialize(compact=True)
 
-def decrypt(value: str, secret: str, salt: str) -> Dict[str, Any]:
-    """Decrypt JWE payload."""
-    encryption_secret =  derive_encryption_secret(secret, salt)
-    
-    try:
-        # Use authlib to decrypt with 10s clock tolerance
-        claims = jwt.decode(
-            value,
-            encryption_secret,
-            claims_options={"exp": {"essential": True}},
-            clock_skew=10
-        )
-        return claims
-    except JoseError as e:
-        raise ValueError(f"Failed to decrypt: {str(e)}")
+def decrypt(token: str, secret: str, salt: str) -> dict:
+    """
+    Decrypts the JWE token back to the original payload.
+    """
+    secret_bytes = secret.encode('utf-8')
+    salt_bytes = salt.encode('utf-8')
+        
+    encryption_secret = derive_encryption_key(secret_bytes, salt_bytes)
+    key = jwk.JWK(k=base64url_encode(encryption_secret), kty="oct")
+
+    jwetoken = jwe.JWE()
+    jwetoken.deserialize(token)
+    jwetoken.decrypt(key)
+    payload_json = jwetoken.payload.decode('utf-8')
+    return json.loads(payload_json)

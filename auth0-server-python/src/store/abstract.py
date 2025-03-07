@@ -58,14 +58,13 @@ class AbstractDataStore(Generic[T], ABC):
         """
         pass
     
-    def encrypt(self, identifier: str, state_data: Dict[str, Any], expiration: int) -> T:
+    def encrypt(self, identifier: str, state_data: Dict[str, Any]) -> T:
         """
         Encrypt data before storing.
         
         Args:
             identifier: Unique key used as part of encryption salt
             state_data: Data to encrypt
-            expiration: Timestamp when the data should expire
             
         Returns:
             Encrypted string representation of the data

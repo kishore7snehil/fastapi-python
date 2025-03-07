@@ -173,3 +173,44 @@ class AuthorizationParameters(BaseModel):
     
     class Config:
         extra = "allow"  # Allow additional OAuth parameters
+        
+class AuthorizationDetails(BaseModel):
+    """
+    Authorization details returned from Auth0.
+    Used for Resource Access Rights (RAR).
+    """
+    type: str
+    actions: Optional[List[str]] = None
+    locations: Optional[List[str]] = None
+    datatypes: Optional[List[str]] = None
+    identifier: Optional[str] = None
+    
+    class Config:
+        extra = "allow"  # Allow additional fields not defined in the model
+
+
+class LoginBackchannelOptions(BaseModel):
+    """
+    Options for Client-Initiated Backchannel Authentication.
+    """
+    binding_message: str
+    login_hint: Dict[str, str]  # Should contain a 'sub' field
+    authorization_params: Optional[Dict[str, Any]] = None
+    
+    class Config:
+        extra = "allow"  # Allow additional fields not defined in the model
+
+
+class LoginBackchannelResult(BaseModel):
+    """
+    Result from Client-Initiated Backchannel Authentication.
+    """
+    authorization_details: Optional[List[AuthorizationDetails]] = None
+
+
+class AccessTokenForConnectionOptions(BaseModel):
+    """
+    Options for retrieving an access token for a specific connection.
+    """
+    connection: str
+    login_hint: Optional[str] = None

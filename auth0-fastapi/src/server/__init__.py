@@ -1,7 +1,3 @@
-"""
-Internal module for handling OAuth callback server and routes.
-"""
+from .routes import router
 
-from .routes import setup_routes
-
-__all__ = ["setup_routes"] 
+__all__ = ["router"]

@@ -90,63 +90,6 @@ def parse_url_params(url: str) -> Dict[str, str]:
     # Convert list values to single strings
     return {k: v[0] if v and len(v) > 0 else '' for k, v in query_params.items()}
 
-
-def update_state_data(
-    audience: str,
-    existing_state_data: Optional[Dict[str, Any]],
-    token_response: Dict[str, Any]
-) -> Dict[str, Any]:
-    """
-    Update state data with new token information.
-    
-    Args:
-        audience: Token audience
-        existing_state_data: Existing state data or None
-        token_response: Response from token endpoint
-        
-    Returns:
-        Updated state data
-    """
-    # Start with existing data or empty dict
-    state_data = existing_state_data or {}
-    
-    # Initialize token_sets if it doesn't exist
-    if 'token_sets' not in state_data:
-        state_data['token_sets'] = []
-    
-    # Create new token set
-    new_token_set = {
-        'audience': audience,
-        'access_token': token_response.get('access_token', ''),
-        'expires_at': int(time.time()) + token_response.get('expires_in', 3600)
-    }
-    
-    if 'scope' in token_response:
-        new_token_set['scope'] = token_response['scope']
-    
-    # Replace existing token set for this audience if it exists
-    replaced = False
-    for i, token_set in enumerate(state_data['token_sets']):
-        if token_set.get('audience') == audience:
-            state_data['token_sets'][i] = new_token_set
-            replaced = True
-            break
-    
-    # Add new token set if not replaced
-    if not replaced:
-        state_data['token_sets'].append(new_token_set)
-    
-    # Update refresh token if present
-    if 'refresh_token' in token_response:
-        state_data['refresh_token'] = token_response['refresh_token']
-    
-    # Update ID token and user info if present
-    if 'id_token' in token_response:
-        state_data['id_token'] = token_response['id_token']
-    
-    return state_data
-
-
 def create_logout_url(domain: str, client_id: str, return_to: Optional[str] = None) -> str:
     """
     Create an Auth0 logout URL.
@@ -166,3 +109,136 @@ def create_logout_url(domain: str, client_id: str, return_to: Optional[str] = No
         params["returnTo"] = return_to
     
     return build_url(base_url, params)
+
+
+def update_state_data(
+    audience: str,
+    state_data: Optional[Dict[str, Any]],
+    token_endpoint_response: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Utility function to update the state with a new response from the token endpoint
+    
+    Args:
+        audience: The audience of the token endpoint response
+        state_data: The existing state data to update, or None if no state data available
+        token_endpoint_response: The response from the token endpoint
+        
+    Returns:
+        Updated state data
+    """
+    current_time = int(time.time())
+    
+    if state_data:
+        # Check if we need to add a new token set or update an existing one
+        is_new_token_set = True
+        token_sets = state_data.get("token_sets", [])
+        
+        for token_set in token_sets:
+            if (token_set.get("audience") == audience and 
+                token_set.get("scope") == token_endpoint_response.get("scope")):
+                is_new_token_set = False
+                break
+        
+        # Create the updated token set
+        updated_token_set = {
+            "audience": audience,
+            "access_token": token_endpoint_response.get("access_token"),
+            "scope": token_endpoint_response.get("scope"),
+            "expires_at": current_time + int(token_endpoint_response.get("expires_in", 0))
+        }
+        
+        # Update or add the token set
+        if is_new_token_set:
+            token_sets = token_sets + [updated_token_set]
+        else:
+            token_sets = [
+                updated_token_set if (ts.get("audience") == audience and 
+                                    ts.get("scope") == token_endpoint_response.get("scope"))
+                else ts
+                for ts in token_sets
+            ]
+        
+        # Return updated state data
+        return {
+            **state_data,
+            "id_token": token_endpoint_response.get("id_token"),
+            "refresh_token": token_endpoint_response.get("refresh_token") or state_data.get("refresh_token"),
+            "token_sets": token_sets
+        }
+    else:
+        # Create completely new state data
+        user = token_endpoint_response.get("claims", {})
+        return {
+            "user": user,
+            "id_token": token_endpoint_response.get("id_token"),
+            "refresh_token": token_endpoint_response.get("refresh_token"),
+            "token_sets": [
+                {
+                    "audience": audience,
+                    "access_token": token_endpoint_response.get("access_token"),
+                    "scope": token_endpoint_response.get("scope"),
+                    "expires_at": current_time + int(token_endpoint_response.get("expires_in", 0))
+                }
+            ],
+            "internal": {
+                "sid": user.get("sid", ""),
+                "created_at": current_time
+            }
+        }
+
+
+def update_state_data_for_connection_token_set(
+    options: Dict[str, Any],
+    state_data: Dict[str, Any],
+    token_endpoint_response: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Update state data with connection token set information
+    
+    Args:
+        options: Options containing connection details
+        state_data: Existing state data
+        token_endpoint_response: Response from token endpoint
+        
+    Returns:
+        Updated state data
+    """
+    # Initialize connection_token_sets if it doesn't exist
+    connection_token_sets = state_data.get("connection_token_sets", [])
+    
+    # Check if we need to add a new token set or update an existing one
+    is_new_token_set = True
+    
+    for token_set in connection_token_sets:
+        if (token_set.get("connection") == options.get("connection") and 
+            (not options.get("login_hint") or token_set.get("login_hint") == options.get("login_hint"))):
+            is_new_token_set = False
+            break
+    
+    # Create the connection token set
+    connection_token_set = {
+        "connection": options.get("connection"),
+        "login_hint": options.get("login_hint"),
+        "access_token": token_endpoint_response.get("access_token"),
+        "scope": token_endpoint_response.get("scope"),
+        "expires_at": int(time.time()) + int(token_endpoint_response.get("expires_in", 0))
+    }
+    
+    # Update or add the token set
+    if is_new_token_set:
+        connection_token_sets = connection_token_sets + [connection_token_set]
+    else:
+        connection_token_sets = [
+            connection_token_set if (ts.get("connection") == options.get("connection") and 
+                                    (not options.get("login_hint") or 
+                                     ts.get("login_hint") == options.get("login_hint")))
+            else ts
+            for ts in connection_token_sets
+        ]
+    
+    # Return updated state data
+    return {
+        **state_data,
+        "connection_token_sets": connection_token_sets
+    }
