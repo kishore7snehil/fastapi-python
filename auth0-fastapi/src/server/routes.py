@@ -24,8 +24,17 @@ async def login(request: Request, response: Response, auth_client: AuthClient = 
     """
   
     return_to: Optional[str] = request.query_params.get("returnTo")
+    auth_url = await auth_client.start_login(
+        request, 
+        app_state={"returnTo": return_to} if return_to else None,
+        store_options={"response": response}
+    )
 
-    return await auth_client.start_login(request, app_state={"returnTo": return_to} if return_to else None, store_options={"response": response})
+    redirect_response = RedirectResponse(url=auth_url)
+    if "set-cookie" in response.headers:
+        for cookie in response.headers.getlist("set-cookie"):
+            redirect_response.headers.append("set-cookie", cookie)
+    return redirect_response
 
 @router.get("/auth/callback")
 async def callback(request: Request, response: Response, auth_client: AuthClient = Depends(get_auth_client)):
@@ -44,6 +53,7 @@ async def callback(request: Request, response: Response, auth_client: AuthClient
     return_to = session_data.get("app_state", {}).get("returnTo")
     
     default_redirect = request.app.state.config.app_base_url  # Assuming config is stored on app.state
+    
     # Create a RedirectResponse and merge Set-Cookie headers from the original response
     redirect_response = RedirectResponse(url=return_to or default_redirect)
     # Merge cookie headers (if any) from `response`

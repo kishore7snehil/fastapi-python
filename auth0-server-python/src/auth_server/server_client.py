@@ -13,7 +13,9 @@ import hashlib
 import json
 from datetime import datetime, timedelta
 
-from authlib.integrations.starlette_client import OAuth, OAuthError
+from authlib.integrations.httpx_client import AsyncOAuth2Client
+from authlib.integrations.base_client.errors import OAuthError
+import httpx 
 from authlib.oidc.core import CodeIDToken
 from authlib.jose import jwt
 from pydantic import BaseModel, ValidationError
@@ -43,7 +45,7 @@ from auth_types import (
     AccessTokenForConnectionOptions,
     LogoutOptions
 )
-from utils import update_state_data_for_connection_token_set,update_state_data
+from utils import PKCE, State, URL
 from store.memory import MemoryStateStore, MemoryTransactionStore
 
 # Generic type for store options
@@ -102,18 +104,18 @@ class ServerClient(Generic[TStoreOptions]):
         self._state_identifier = state_identifier
         
         # Initialize OAuth client
-        self._oauth = OAuth()
-        self._oauth.register(
-            name="auth0",
-            server_metadata_url=f"https://{domain}/.well-known/openid-configuration",
+        self._oauth = AsyncOAuth2Client(
             client_id=client_id,
             client_secret=client_secret,
-            authorize_url=f"https://{domain}/authorize",
-            client_kwargs={
-                "scope": "openid profile email",
-                "token_endpoint_auth_method": "client_secret_post"
-            }
         )
+
+    async def _fetch_oidc_metadata(self, domain: str) -> dict:
+        metadata_url = f"https://{domain}/.well-known/openid-configuration"
+        async with httpx.AsyncClient() as client:
+            response = await client.get(metadata_url)
+            response.raise_for_status()
+            return response.json()
+
     
     async def start_interactive_login(
         self,
@@ -146,15 +148,15 @@ class ServerClient(Generic[TStoreOptions]):
             auth_params["redirect_uri"] = self._redirect_uri
         
         # Generate PKCE code verifier and challenge
-        code_verifier = self._generate_code_verifier()
-        code_challenge = self._generate_code_challenge(code_verifier)
+        code_verifier = PKCE.generate_code_verifier()
+        code_challenge = PKCE.generate_code_challenge(code_verifier)
         
         # Add PKCE parameters to the authorization request
         auth_params["code_challenge"] = code_challenge
         auth_params["code_challenge_method"] = "S256"
         
         # State parameter to prevent CSRF
-        state = self._generate_random_string(32)
+        state = PKCE.generate_random_string(32)
         auth_params["state"] = state
         
         # Build the transaction data to store
@@ -171,19 +173,22 @@ class ServerClient(Generic[TStoreOptions]):
         )
 
         # Generate the authorization URL
-        auth_client = self._oauth.auth0
-        redirect_response = await auth_client.authorize_redirect(request, **auth_params)
+        try:
+            self._oauth.metadata = await self._fetch_oidc_metadata(self._domain)
+        except Exception as e:
+            raise ApiError("metadata_error", "Failed to fetch OIDC metadata", e)
 
-        # If store_options contains a Response with Set-Cookie header, merge it
-        if store_options and "response" in store_options:
-            store_response = store_options["response"]
-            # Check if there is a Set-Cookie header in the store_response
-            cookie = store_response.headers.get("set-cookie")
-            if cookie:
-                # Append the Set-Cookie header to the redirect_response
-                redirect_response.headers.append("set-cookie", cookie)
+        if "authorization_endpoint" not in self._oauth.metadata:
+            raise ApiError("configuration_error", "Authorization endpoint missing in OIDC metadata")
 
-        return redirect_response
+        authorization_endpoint = self._oauth.metadata["authorization_endpoint"]
+
+        try:
+            auth_url, state = self._oauth.create_authorization_url(authorization_endpoint, **auth_params)
+        except Exception as e:
+            raise ApiError("authorization_url_error", "Failed to create authorization URL", e)
+
+        return auth_url
     
     async def complete_interactive_login(
         self, 
@@ -230,13 +235,16 @@ class ServerClient(Generic[TStoreOptions]):
         
         # Exchange the code for tokens
         try:
-            auth_client = self._oauth.auth0
-            token_response = await auth_client.authorize_access_token(
-                request,
-                code_verifier=transaction_data.code_verifier
+            token_endpoint = self._oauth.metadata["token_endpoint"]
+            token_response = await self._oauth.fetch_token(
+                token_endpoint,
+                code=code,
+                code_verifier=transaction_data.code_verifier,
+                redirect_uri=self._redirect_uri,
             )
         except OAuthError as e:
-            raise ApiError("token_error", str(e), e)
+            # Raise a custom error (or handle it as appropriate)
+            raise ApiError("token_error", f"Token exchange failed: {str(e)}", e)
         
        # Use the userinfo field from the token_response for user claims
         user_info = token_response.get("userinfo")
@@ -259,7 +267,7 @@ class ServerClient(Generic[TStoreOptions]):
         )
         
         # Generate a session id (sid) from token_response or transaction data, or create a new one
-        sid = user_info.get("sid") if user_info and "sid" in user_info else self._generate_random_string(32)
+        sid = user_info.get("sid") if user_info and "sid" in user_info else PKCE.generate_random_string(32)
         
         # Construct state data to represent the session
         state_data = StateData(
@@ -317,7 +325,7 @@ class ServerClient(Generic[TStoreOptions]):
         existing_state_data = await self._state_store.get(self._state_identifier, store_options)
         
         audience = getattr(self._options.get("authorization_params", {}), "audience", "default")
-        state_data = update_state_data(
+        state_data = State.update_state_data(
             audience,
             existing_state_data,
             token_endpoint_response
@@ -413,7 +421,7 @@ class ServerClient(Generic[TStoreOptions]):
         
         # Update state data with new token
         existing_state_data = await self._state_store.get(self._state_identifier, store_options)
-        updated_state_data = update_state_data(audience, existing_state_data, token_endpoint_response)
+        updated_state_data = State.update_state_data(audience, existing_state_data, token_endpoint_response)
         
         # Store updated state
         await self._state_store.set(self._state_identifier, updated_state_data, False, store_options)
@@ -473,7 +481,7 @@ class ServerClient(Generic[TStoreOptions]):
         })
         
         # Update state data with new token
-        updated_state_data = update_state_data_for_connection_token_set(options, state_data, token_endpoint_response)
+        updated_state_data = State.update_state_data_for_connection_token_set(options, state_data, token_endpoint_response)
         
         # Store updated state
         await self._state_store.set(self._state_identifier, updated_state_data, False, store_options)
@@ -486,33 +494,13 @@ class ServerClient(Generic[TStoreOptions]):
         options: Optional[LogoutOptions] = None,
         store_options: Optional[Dict[str, Any]] = None
     ) -> str:
-        """
-        Logs the user out and returns a URL to redirect to.
-        
-        Args:
-            options: Configuration options for the logout process
-            store_options: Options to pass to the state store
-            
-        Returns:
-            Logout URL to redirect the user to
-        """
         options = options or LogoutOptions()
         
         # Delete the session from the state store
         await self._state_store.delete(self._state_identifier, store_options)
         
-        # Build the logout URL
-        base_url = f"https://{self._domain}/v2/logout"
-        params = {
-            "client_id": self._client_id,
-        }
-        
-        if options.return_to:
-            params["returnTo"] = options.return_to
-            
-        # Convert params to query string
-        query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-        logout_url = f"{base_url}?{query_string}"
+        # Use the URL helper to create the logout URL.
+        logout_url = URL.create_logout_url(self._domain, self._client_id, options.return_to)
         
         return logout_url
     
@@ -552,18 +540,4 @@ class ServerClient(Generic[TStoreOptions]):
         except (jwt.JoseError, ValidationError) as e:
             raise BackchannelLogoutError(f"Error processing logout token: {str(e)}")
     
- # Helper methods
-    def _generate_random_string(self, length: int = 64) -> str:
-        """Generate a random string of the specified length."""
-        alphabet = string.ascii_letters + string.digits
-        return ''.join(secrets.choice(alphabet) for _ in range(length))
-    
-    def _generate_code_verifier(self) -> str:
-        """Generate a PKCE code verifier."""
-        return self._generate_random_string(64)
-    
-    def _generate_code_challenge(self, code_verifier: str) -> str:
-        """Generate a PKCE code challenge from a code verifier."""
-        code_challenge_digest = hashlib.sha256(code_verifier.encode()).digest()
-        code_challenge = base64.urlsafe_b64encode(code_challenge_digest).decode('utf-8')
-        return code_challenge.rstrip('=')
+
