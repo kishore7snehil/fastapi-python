@@ -214,3 +214,9 @@ class AccessTokenForConnectionOptions(BaseModel):
     """
     connection: str
     login_hint: Optional[str] = None
+
+class StartLinkUserOptions(BaseModel):
+    connection: str
+    connection_scope: Optional[str] = None
+    authorization_params: Optional[Dict[str, Any]] = None
+    app_state: Optional[Any] = None

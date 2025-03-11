@@ -4,20 +4,16 @@ Handles authentication flows, token management, and user sessions.
 """
 
 import time
-import secrets
-import string
 from typing import Dict, Any, Optional, List, Union, TypeVar, Generic, Callable
 from urllib.parse import urlparse, parse_qs
-import base64
-import hashlib
 import json
-from datetime import datetime, timedelta
+import asyncio
+import jwt
 
 from authlib.integrations.httpx_client import AsyncOAuth2Client
 from authlib.integrations.base_client.errors import OAuthError
 import httpx 
-from authlib.oidc.core import CodeIDToken
-from authlib.jose import jwt
+
 from pydantic import BaseModel, ValidationError
 from starlette.requests import Request
 from starlette.responses import RedirectResponse
@@ -30,6 +26,7 @@ from error import (
     BackchannelLogoutError,
     AccessTokenError,
     AccessTokenForConnectionError,
+    StartLinkUserError,
     AccessTokenErrorCode,
     AccessTokenForConnectionErrorCode
     
@@ -244,7 +241,7 @@ class ServerClient(Generic[TStoreOptions]):
             )
         except OAuthError as e:
             # Raise a custom error (or handle it as appropriate)
-            raise ApiError("token_error", f"Token exchange failed: {str(e)}", e)
+            raise ApiError("token_error", f"Token exchange failed: {str(e)}", e)  
         
        # Use the userinfo field from the token_response for user claims
         user_info = token_response.get("userinfo")
@@ -253,10 +250,11 @@ class ServerClient(Generic[TStoreOptions]):
             user_claims = UserClaims.parse_obj(user_info)
         else:
             # Alternatively, decode id_token if needed (not recommended if userinfo is available)
-            id_token = token_response.get("id_token")
+            id_token = token_response.get("id_token")            
             if id_token:
-                # Note: For production, properly verify the token
-                user_claims = UserClaims.parse_obj(jwt.decode(id_token, key=None, claims_options={"verify_signature": False}))
+                # Note: For production, properly verify the token                
+                claims = jwt.decode(id_token, options={"verify_signature": False})
+                user_claims = UserClaims.parse_obj(claims)
         
         # Build a token set using the token response data
         token_set = TokenSet(
@@ -316,7 +314,7 @@ class ServerClient(Generic[TStoreOptions]):
         Returns:
             A dictionary containing the authorizationDetails (when RAR was used).
         """
-        token_endpoint_response = await self._auth_client.backchannel_authentication({
+        token_endpoint_response = await self.backchannel_authentication({
             "binding_message": options.binding_message,
             "login_hint": options.login_hint,
             "authorization_params": options.authorization_params,
@@ -324,18 +322,20 @@ class ServerClient(Generic[TStoreOptions]):
         
         existing_state_data = await self._state_store.get(self._state_identifier, store_options)
         
-        audience = getattr(self._options.get("authorization_params", {}), "audience", "default")
+        audience = self._default_authorization_params.get("audience", "default")
+
         state_data = State.update_state_data(
             audience,
             existing_state_data,
             token_endpoint_response
         )
-        
-        await self._state_store.set(self._state_identifier, state_data, True, store_options)
-        
-        return {
+
+        await self._state_store.set(self._state_identifier, state_data, store_options)
+
+        result = {
             "authorization_details": token_endpoint_response.get("authorization_details")
         }
+        return result
 
     async def get_user(self, store_options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """
@@ -350,8 +350,9 @@ class ServerClient(Generic[TStoreOptions]):
         state_data = await self._state_store.get(self._state_identifier, store_options)
         
         if state_data:
+            if hasattr(state_data, "dict") and callable(state_data.dict):
+                state_data = state_data.dict()
             return state_data.get("user")
-        
         return None
 
     async def get_session(self, store_options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
@@ -367,10 +368,10 @@ class ServerClient(Generic[TStoreOptions]):
         state_data = await self._state_store.get(self._state_identifier, store_options)
         
         if state_data:
-            # Create a copy and remove internal data
+            if hasattr(state_data, "dict") and callable(state_data.dict):
+                state_data = state_data.dict()
             session_data = {k: v for k, v in state_data.items() if k != "internal"}
             return session_data
-        
         return None
 
     async def get_access_token(self, store_options: Optional[Dict[str, Any]] = None) -> str:
@@ -541,3 +542,280 @@ class ServerClient(Generic[TStoreOptions]):
             raise BackchannelLogoutError(f"Error processing logout token: {str(e)}")
     
 
+    async def start_link_user(
+        self,
+        options,
+        store_options: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Starts the user linking process, and returns a URL to redirect the user-agent to.
+        
+        Args:
+            options: Options used to configure the user linking process.
+            store_options: Optional options used to pass to the Transaction and State Store.
+            
+        Returns:
+            URL to redirect the user to for authentication.
+        """
+        state_data = await self._state_store.get(self._state_identifier, store_options)
+        
+        if not state_data or not state_data.get("id_token"):
+            raise StartLinkUserError(
+                "Unable to start the user linking process without a logged in user. Ensure to login using the SDK before starting the user linking process."
+            )
+        
+        # Generate PKCE and state for security
+        code_verifier = PKCE.generate_code_verifier()
+        state = PKCE.generate_random_string(32)
+        
+        # Build the URL for user linking
+        link_user_url = await self._build_link_user_url(
+            connection=options.connection,
+            connection_scope=options.connection_scope,
+            id_token=state_data["id_token"],
+            code_verifier=code_verifier,
+            state=state,
+            authorization_params=options.authorization_params
+        )
+        
+        # Store transaction data
+        transaction_data = TransactionData(
+            code_verifier=code_verifier,
+            app_state=options.app_state
+        )
+        
+        await self._transaction_store.set(
+            f"{self._transaction_identifier}:{state}", 
+            transaction_data,
+            options=store_options
+        )
+        
+        return link_user_url
+    
+    async def complete_link_user(
+        self,
+        url: str,
+        store_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Completes the user linking process.
+        
+        Args:
+            url: The URL from which the query params should be extracted
+            store_options: Optional options for the stores
+            
+        Returns:
+            Dictionary containing the original app state
+        """
+        # We can reuse the interactive login completion since the flow is similar
+        result = await self.complete_interactive_login(url, store_options)
+        
+        # Return just the app state as specified
+        return {
+            "app_state": result.get("app_state")
+        }
+    
+
+    # Authlib Helpers
+
+    async def _build_link_user_url(
+        self,
+        connection: str,
+        id_token: str,
+        code_verifier: str,
+        state: str,
+        connection_scope: Optional[str] = None,
+        authorization_params: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Build a URL for linking user accounts"""
+        # Generate code challenge from verifier
+        code_challenge = PKCE.generate_code_challenge(code_verifier)
+        
+        # Get metadata if not already fetched
+        if not hasattr(self, '_oauth_metadata'):
+            self._oauth_metadata = await self._fetch_oidc_metadata(self._domain)
+        
+        # Get authorization endpoint
+        auth_endpoint = self._oauth_metadata.get("authorization_endpoint", 
+                                                f"https://{self._domain}/authorize")
+        
+        # Build params
+        params = {
+            "code_challenge": code_challenge,
+            "code_challenge_method": "SH256",
+            "state": state,
+            "requested_connection": connection,
+            "requested_connection_scope": connection_scope,
+            "id_token_hint": id_token,
+            "scope": "openid link_account",
+            "prompt": "login"
+        }
+        
+        # Add connection scope if provided
+        if connection_scope:
+            params["requested_connection_scope"] = connection_scope
+        
+        # Add any additional parameters
+        if authorization_params:
+            params.update(authorization_params)
+        
+        return URL.build_url(auth_endpoint, params)
+    
+    async def backchannel_authentication(
+        self,
+        options: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Initiates backchannel authentication with Auth0.
+        
+        This method starts a Client-Initiated Backchannel Authentication (CIBA) flow,
+        which allows an application to request authentication from a user via a separate
+        device or channel.
+        
+        Args:
+            options: Configuration options for backchannel authentication
+            
+        Returns:
+            Token response data from the backchannel authentication
+            
+        Raises:
+            ApiError: If the backchannel authentication fails
+        """
+        try:
+            # Fetch OpenID Connect metadata if not already fetched
+            if not hasattr(self, '_oauth_metadata'):
+                self._oauth_metadata = await self._fetch_oidc_metadata(self._domain)
+            
+            # Get the issuer from metadata
+            issuer = self._oauth_metadata.get("issuer") or f"https://{self._domain}/"
+            
+            # Get backchannel authentication endpoint
+            backchannel_endpoint = self._oauth_metadata.get("backchannel_authentication_endpoint")
+            if not backchannel_endpoint:
+                raise ApiError(
+                    "configuration_error", 
+                    "Backchannel authentication is not supported by the authorization server"
+                )
+            
+            # Get token endpoint
+            token_endpoint = self._oauth_metadata.get("token_endpoint")
+            if not token_endpoint:
+                raise ApiError(
+                    "configuration_error", 
+                    "Token endpoint is missing in OIDC metadata"
+                )
+            
+            sub = sub = options.get('login_hint', {}).get("sub")  
+            if not sub:
+                raise ApiError(
+                    "invalid_parameter",
+                    "login_hint must contain a 'sub' field"
+                )
+                
+            # Prepare login hint in the required format
+            login_hint = json.dumps({
+                "format": "iss_sub",
+                "iss": issuer,
+                "sub": sub 
+            })
+            
+            # The Request Parameters
+            params = {
+                "client_id": self._client_id,
+                "scope": "openid profile email",  # DEFAULT_SCOPES 
+                "login_hint": login_hint,
+            }
+            
+            
+            # Add binding message if provided
+            if options.get('binding_message'):
+                params["binding_message"] = options.get('binding_message')
+                
+            # Add any additional authorization parameters
+            if self._default_authorization_params:
+                params.update(self._default_authorization_params)
+                
+            if options.get('authorization_params'):
+                params.update(options.get('authorization_params'))
+
+            # Make the backchannel authentication request
+            async with httpx.AsyncClient() as client:
+                backchannel_response = await client.post(
+                    backchannel_endpoint,
+                    data=params,
+                    auth=(self._client_id, self._client_secret)
+                )
+
+                if backchannel_response.status_code != 200:
+                    error_data = backchannel_response.json()
+                    raise ApiError(
+                        error_data.get("error", "backchannel_error"),
+                        error_data.get("error_description", "Backchannel authentication request failed")
+                    )
+                    
+                backchannel_data = backchannel_response.json()
+                auth_req_id = backchannel_data.get("auth_req_id")
+                expires_in = backchannel_data.get("expires_in", 120)  # Default to 2 minutes
+                interval = backchannel_data.get("interval", 5)  # Default to 5 seconds
+                
+                if not auth_req_id:
+                    raise ApiError(
+                        "invalid_response", 
+                        "Missing auth_req_id in backchannel authentication response"
+                    )
+                
+                # Poll for token using the auth_req_id
+                token_params = {
+                    "grant_type": "urn:openid:params:grant-type:ciba",
+                    "auth_req_id": auth_req_id,
+                    "client_id": self._client_id,
+                    "client_secret": self._client_secret
+                }
+                
+                # Calculate when to stop polling
+                end_time = time.time() + expires_in
+                
+                # Poll until we get a response or timeout
+                while time.time() < end_time:
+                    # Make token request
+                    token_response = await client.post(token_endpoint, data=token_params)
+                    
+                    # Check for success (200 OK)
+                    if token_response.status_code == 200:
+                        # Success! Parse and return the token response
+                        return token_response.json()
+                    
+                    # Check for specific error that indicates we should continue polling
+                    if token_response.status_code == 400:
+                        error_data = token_response.json()
+                        error = error_data.get("error")
+                        
+                        # authorization_pending means we should keep polling
+                        if error == "authorization_pending":
+                            # Wait for the specified interval before polling again
+                            await asyncio.sleep(interval)
+                            continue
+                        
+                        # Other errors should be raised
+                        raise ApiError(
+                            error, 
+                            error_data.get("error_description", "Token request failed")
+                        )
+                    
+                    # Any other status code is an error
+                    raise ApiError(
+                        "token_error",
+                        f"Unexpected status code: {token_response.status_code}"
+                    )
+                
+                # If we get here, we've timed out
+                raise ApiError("timeout", "Backchannel authentication timed out")
+                
+        except Exception as e:
+            if isinstance(e, ApiError):
+                raise
+            raise ApiError(
+                "backchannel_error",
+                f"Backchannel authentication failed: {str(e)}",
+                e
+            )

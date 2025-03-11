@@ -10,7 +10,7 @@ class StatefulStateStore(StateStore):
     
     The underlying session store must implement asynchronous get, set, delete, and keys methods.
     """
-    def __init__(self, secret: str, store: Any, cookie_name: str = "auth0_session", expiration: int = 259200):
+    def __init__(self, secret: str, store: Any, cookie_name: str = "_a0_session", expiration: int = 259200):
         """
         :param secret: Secret for encryption (if needed)
         :param store: The persistent session store (e.g., a Redis client wrapper)
@@ -64,7 +64,7 @@ class StatefulStateStore(StateStore):
             return None
         
         try:
-            return StateData.parse_raw(data)
+            return StateData.parse_obj(data)
         except Exception:
             return None
 

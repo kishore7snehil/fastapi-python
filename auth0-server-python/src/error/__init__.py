@@ -87,6 +87,18 @@ class AccessTokenForConnectionError(Auth0Error):
         self.code = code
         self.name = "AccessTokenForConnectionError"
 
+class StartLinkUserError(Auth0Error):
+    """
+    Error raised when user linking process fails to start.
+    This typically happens when trying to link accounts without 
+    having an authenticated user first.
+    """
+    code = "start_link_user_error"
+    
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.name = "StartLinkUserError"
+
 
 # Error code enumerations - these can be used to identify specific error scenarios
 

@@ -53,7 +53,7 @@ class RedisStore(BaseStore):
 ```
 ### Usage Example
 ```python
-from auth_client import Auth
+from auth_client import AuthClient
 from auth_client.stores import RedisStore
 # Create a Redis store
 redis_store = RedisStore(
@@ -63,7 +63,7 @@ redis_store = RedisStore(
     ttl=3600  # 1 hour session TTL
 )
 # Initialize AIAuth with Redis store
-auth = Auth(store=<store_name>)
+auth_client = AuthClient(config, state_store=custom_state_store)
 
 ```
 ### Environment Variable Configuration

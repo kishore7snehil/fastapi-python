@@ -35,6 +35,7 @@ class PKCE:
 class State:
     @classmethod
     def update_state_data(
+        cls,
         audience: str,
         state_data: Optional[Dict[str, Any]],
         token_endpoint_response: Dict[str, Any]
@@ -113,6 +114,7 @@ class State:
 
     @classmethod
     def update_state_data_for_connection_token_set(
+        cls,
         options: Dict[str, Any],
         state_data: Dict[str, Any],
         token_endpoint_response: Dict[str, Any]

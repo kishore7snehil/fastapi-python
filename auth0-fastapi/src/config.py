@@ -1,5 +1,5 @@
 from pydantic import BaseModel, AnyUrl, Field
-from typing import Optional
+from typing import Optional, Dict, Any
 
 class Auth0Config(BaseModel):
     """
@@ -11,6 +11,7 @@ class Auth0Config(BaseModel):
     app_base_url: AnyUrl = Field(..., alias="appBaseUrl", description="Base URL of your application (e.g., https://example.com)")
     secret: str = Field(..., description="Secret used for encryption and signing cookies")
     audience: Optional[str] = Field(None, description="Target audience for tokens (if applicable)")
+    authorization_params: Optional[Dict[str, Any]] = Field(None, description="Additional parameters to include in the authorization request")
     pushed_authorization_requests: bool = Field(False, description="Whether to use pushed authorization requests")
     mount_routes: bool = Field(True, description="Flag to mount the default auth routes")
     cookie_name: str = Field("auth0_session", description="Name of the cookie storing session data")

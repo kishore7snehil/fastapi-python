@@ -1,5 +1,5 @@
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 
 from .abstract import AbstractDataStore
 from .abstract import StateStore
@@ -51,8 +51,7 @@ class MemoryStateStore(MemoryStore, StateStore):
     async def set(
         self, 
         identifier: str, 
-        state: StateData, 
-        remove_if_expires: bool = False, 
+        state: Union[StateData, Dict[str, Any]],  
         options: Optional[Dict[str, Any]] = None
     ) -> None:
         """
@@ -60,12 +59,15 @@ class MemoryStateStore(MemoryStore, StateStore):
         
         Args:
             identifier: Unique key for the stored data
-            state: StateData object to store
+            state: StateData object or dictionary to store
             options: Additional operation-specific options
         """
-        
+        if hasattr(state, 'dict') and callable(state.dict):
+            state_dict = state.dict()
+        else:
+            state_dict = state  # assume it's already a dictionary
         # Encrypt the state data before storing
-        encrypted_value = self.encrypt(identifier, state.dict())
+        encrypted_value = self.encrypt(identifier, state_dict)
         
         # Store the encrypted data
         self._data[identifier] = encrypted_value
@@ -74,7 +76,7 @@ class MemoryStateStore(MemoryStore, StateStore):
         self, 
         identifier: str, 
         options: Optional[Dict[str, Any]] = None
-    ) -> Optional[StateData]:
+    ) -> Optional[Union[StateData, Dict[str, Any]]]:
         """
         Retrieve state data by identifier.
         
@@ -83,7 +85,7 @@ class MemoryStateStore(MemoryStore, StateStore):
             options: Additional operation-specific options
             
         Returns:
-            StateData object or None if not found
+            StateData object, dictionary, or None if not found
         """
         # Get encrypted data from dictionary
         encrypted_value = self._data.get(identifier)
@@ -92,9 +94,9 @@ class MemoryStateStore(MemoryStore, StateStore):
             return None
         
         try:
-            # Decrypt and convert back to StateData object
+            # Decrypt and convert back to StateData object (if required)
             decrypted_data = self.decrypt(identifier, encrypted_value)
-            return StateData.parse_obj(decrypted_data)
+            return decrypted_data
         except Exception:
             # If decryption fails (e.g., expired), remove the entry
             await self.delete(identifier)

@@ -104,3 +104,20 @@ async def backchannel_logout(request: Request, auth_client: AuthClient = Depends
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     return Response(status_code=204)
+
+#################### Testing Route ###################################
+@router.get("/auth/profile")
+async def profile(request: Request, response:Response, auth_client: AuthClient = Depends(get_auth_client)):
+    # Prepare store_options with the Request object (used by the state store to read cookies)
+    store_options = {"request": request, "response": response}
+    try:
+        # Retrieve user information and session data from the state store
+        user = await auth_client.client.get_user(store_options=store_options)
+        session = await auth_client.client.get_session(store_options=store_options)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    return {
+        "user": user,
+        "session": session
+    }

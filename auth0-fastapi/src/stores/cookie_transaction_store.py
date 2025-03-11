@@ -10,7 +10,7 @@ class CookieTransactionStore(TransactionStore):
     This store expects the FastAPI Request and Response objects to be provided in the
     store_options parameter.
     """
-    def __init__(self, secret: str, cookie_name: str = "auth0_tx"):
+    def __init__(self, secret: str, cookie_name: str = "_a0_tx"):
         super().__init__({"secret": secret})
         self.cookie_name = cookie_name
 

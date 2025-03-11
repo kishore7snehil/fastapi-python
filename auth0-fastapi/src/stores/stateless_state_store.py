@@ -8,7 +8,7 @@ class StatelessStateStore(StateStore):
     A stateless state store that encodes session data entirely in a cookie.
     The data is expected to be encrypted and tamper-proof.
     """
-    def __init__(self, secret: str, cookie_name: str = "auth0_session", expiration: int = 259200):
+    def __init__(self, secret: str, cookie_name: str = "_a0_session", expiration: int = 259200):
         super().__init__({"secret": secret})
         self.cookie_name = cookie_name
         self.expiration = expiration
@@ -81,13 +81,15 @@ class StatelessStateStore(StateStore):
             return ""
  
         session_parts.sort()  # Sort by index
+
         full_encoded_data = "".join(part[1] for part in session_parts)
         if not full_encoded_data:
             return None
         try:
             # Decrypt the stored value using the abstract store's decrypt method:
             decrypted_data = self.decrypt(identifier, full_encoded_data)
-            return StateData.parse_raw(decrypted_data)
+            print(decrypted_data)
+            return StateData.parse_obj(decrypted_data)
         except Exception:
             return None
 

@@ -24,10 +24,10 @@ class AuthClient:
         
         # Use provided state_store or default to an in-memory implementation
         if state_store is None:
-            state_store = StatelessStateStore(config.secret, cookie_name="auth0_session", expiration=config.session_expiration)
+            state_store = StatelessStateStore(config.secret, cookie_name="_a0_session", expiration=config.session_expiration)
         # Use provided transaction_store or default to an cookie implementation
         if transaction_store is None:
-            transaction_store = CookieTransactionStore(config.secret, cookie_name="auth0_tx")
+            transaction_store = CookieTransactionStore(config.secret, cookie_name="_a0_tx")
         
         self.client = ServerClient(
             domain=config.domain,
@@ -41,6 +41,7 @@ class AuthClient:
             authorization_params={
                 "audience": config.audience,
                 "redirect_uri": redirect_uri,
+                **(config.authorization_params or {})
             },
         )
     
