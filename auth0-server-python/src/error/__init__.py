@@ -108,9 +108,12 @@ class AccessTokenErrorCode:
     MISSING_REFRESH_TOKEN = "missing_refresh_token"
     FAILED_TO_REFRESH_TOKEN = "failed_to_refresh_token"
     FAILED_TO_REQUEST_TOKEN = "failed_to_request_token"
+    REFRESH_TOKEN_ERROR = "refresh_token_error"
 
 
 class AccessTokenForConnectionErrorCode:
     """Error codes for connection-specific token operations."""
     MISSING_REFRESH_TOKEN = "missing_refresh_token"
     FAILED_TO_RETRIEVE = "failed_to_retrieve"
+    API_ERROR = "api_error"
+    FETCH_ERROR = "retrieval_error"

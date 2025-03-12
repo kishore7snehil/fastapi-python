@@ -392,14 +392,20 @@ class ServerClient(Generic[TStoreOptions]):
         state_data = await self._state_store.get(self._state_identifier, store_options)
         
         # Get audience and scope from options or use defaults
-        auth_params = getattr(self._options, "authorization_params", {}) or {}
+        auth_params = self._default_authorization_params or {}
         audience = auth_params.get("audience", "default")
         scope = auth_params.get("scope")
+
         
+        if state_data and hasattr(state_data, "dict") and callable(state_data.dict):
+            state_data_dict = state_data.dict()
+        else:
+            state_data_dict = state_data or {}
+
         # Find matching token set
         token_set = None
-        if state_data and state_data.get("token_sets"):
-            for ts in state_data["token_sets"]:
+        if state_data_dict and "token_sets" in state_data_dict:
+            for ts in state_data_dict["token_sets"]:
                 if ts.get("audience") == audience and (not scope or ts.get("scope") == scope):
                     token_set = ts
                     break
@@ -409,29 +415,37 @@ class ServerClient(Generic[TStoreOptions]):
             return token_set["access_token"]
         
         # Check for refresh token
-        if not state_data or not state_data.get("refresh_token"):
+        if not state_data_dict or not state_data_dict.get("refresh_token"):
             raise AccessTokenError(
                 AccessTokenErrorCode.MISSING_REFRESH_TOKEN,
                 "The access token has expired and a refresh token was not provided. The user needs to re-authenticate."
             )
         
         # Get new token with refresh token
-        token_endpoint_response = await self._auth_client.get_token_by_refresh_token({
-            "refresh_token": state_data["refresh_token"]
-        })
-        
-        # Update state data with new token
-        existing_state_data = await self._state_store.get(self._state_identifier, store_options)
-        updated_state_data = State.update_state_data(audience, existing_state_data, token_endpoint_response)
-        
-        # Store updated state
-        await self._state_store.set(self._state_identifier, updated_state_data, False, store_options)
-        
-        return token_endpoint_response["access_token"]
+        try:
+            token_endpoint_response = await self.get_token_by_refresh_token({
+                "refresh_token": state_data_dict["refresh_token"]
+            })
+            
+            # Update state data with new token
+            existing_state_data = await self._state_store.get(self._state_identifier, store_options)
+            updated_state_data = State.update_state_data(audience, existing_state_data, token_endpoint_response)
+            
+            # Store updated state
+            await self._state_store.set(self._state_identifier, updated_state_data, options=store_options)
+            
+            return token_endpoint_response["access_token"]
+        except Exception as e:
+            if isinstance(e, AccessTokenError):
+                raise
+            raise AccessTokenError(
+                AccessTokenErrorCode.REFRESH_TOKEN_ERROR,
+                f"Failed to get token with refresh token: {str(e)}"
+            )
 
     async def get_access_token_for_connection(
         self,
-        options: AccessTokenForConnectionOptions,
+        options: Dict[str, Any],
         store_options: Optional[Dict[str, Any]] = None
     ) -> str:
         """
@@ -454,38 +468,42 @@ class ServerClient(Generic[TStoreOptions]):
                 there was an issue requesting the access token.
         """
         state_data = await self._state_store.get(self._state_identifier, store_options)
+
+        if state_data and hasattr(state_data, "dict") and callable(state_data.dict):
+            state_data_dict = state_data.dict()
+        else:
+            state_data_dict = state_data or {}
         
         # Find existing connection token
         connection_token_set = None
-        if state_data and state_data.get("connection_token_sets"):
-            for ts in state_data["connection_token_sets"]:
-                if ts.get("connection") == options.connection:
+        if state_data_dict and len(state_data_dict["connection_token_sets"]) > 0:
+            for ts in state_data_dict.get("connection_token_sets"):
+                if ts.get("connection") == options["connection"]:
                     connection_token_set = ts
                     break
-        
+  
         # If token is valid, return it
         if connection_token_set and connection_token_set.get("expires_at", 0) > time.time():
             return connection_token_set["access_token"]
         
         # Check for refresh token
-        if not state_data or not state_data.get("refresh_token"):
+        if not state_data_dict or not state_data_dict.get("refresh_token"):
             raise AccessTokenForConnectionError(
                 AccessTokenForConnectionErrorCode.MISSING_REFRESH_TOKEN,
                 "A refresh token was not found but is required to be able to retrieve an access token for a connection."
             )
-        
         # Get new token for connection
-        token_endpoint_response = await self._auth_client.get_token_for_connection({
-            "connection": options.connection,
-            "login_hint": options.login_hint,
-            "refresh_token": state_data["refresh_token"]
+        token_endpoint_response = await self.get_token_for_connection({
+            "connection": options.get("connection"),
+            "login_hint": options.get("login_hint"),
+            "refresh_token": state_data_dict["refresh_token"]
         })
         
         # Update state data with new token
-        updated_state_data = State.update_state_data_for_connection_token_set(options, state_data, token_endpoint_response)
+        updated_state_data = State.update_state_data_for_connection_token_set(options, state_data_dict, token_endpoint_response)
         
         # Store updated state
-        await self._state_store.set(self._state_identifier, updated_state_data, False, store_options)
+        await self._state_store.set(self._state_identifier, updated_state_data, store_options)
         
         return token_endpoint_response["access_token"]
     
@@ -521,8 +539,7 @@ class ServerClient(Generic[TStoreOptions]):
             raise BackchannelLogoutError("Missing logout token")
         
         try:
-            # Decode the token without verification (for demonstration)
-            # In production, you should verify the token signature
+            # Decode the token without verification
             claims = jwt.decode(logout_token, options={"verify_signature": False})
             
             # Validate the token is a logout token
@@ -817,5 +834,152 @@ class ServerClient(Generic[TStoreOptions]):
             raise ApiError(
                 "backchannel_error",
                 f"Backchannel authentication failed: {str(e)}",
+                e
+            )
+
+    async def get_token_by_refresh_token(self, options: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Retrieves a token by exchanging a refresh token.
+        
+        Args:
+            options: Dictionary containing the refresh token and any additional options.
+                Must include a 'refresh_token' key.
+        
+        Raises:
+            AccessTokenError: If there was an issue requesting the access token.
+        
+        Returns:
+            A dictionary containing the token response from Auth0.
+        """
+        refresh_token = options.get("refresh_token")
+        if not refresh_token:
+            raise MissingRequiredArgumentError("refresh_token")
+        
+        try:
+            # Ensure we have the OIDC metadata
+            if not hasattr(self._oauth, "metadata") or not self._oauth.metadata:
+                self._oauth.metadata = await self._fetch_oidc_metadata(self._domain)
+            
+            token_endpoint = self._oauth.metadata.get("token_endpoint")
+            if not token_endpoint:
+                raise ApiError("configuration_error", "Token endpoint missing in OIDC metadata")
+            
+            # Prepare the token request parameters
+            token_params = {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": self._client_id,
+            }
+            
+            # Add scope if present in the original authorization params
+            if "scope" in self._default_authorization_params:
+                token_params["scope"] = self._default_authorization_params["scope"]
+            
+            # Exchange the refresh token for an access token
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    token_endpoint,
+                    data=token_params,
+                    auth=(self._client_id, self._client_secret)
+                )
+                
+                if response.status_code != 200:
+                    error_data = response.json()
+                    raise ApiError(
+                        error_data.get("error", "refresh_token_error"),
+                        error_data.get("error_description", "Failed to exchange refresh token")
+                    )
+                
+                token_response = response.json()
+                
+                # Add required fields if they are missing
+                if "expires_in" in token_response and "expires_at" not in token_response:
+                    token_response["expires_at"] = int(time.time()) + token_response["expires_in"]
+                    
+                return token_response
+                
+        except Exception as e:
+            if isinstance(e, ApiError):
+                raise
+            raise AccessTokenError(
+                AccessTokenErrorCode.REFRESH_TOKEN_ERROR,
+                "The access token has expired and there was an error while trying to refresh it.",
+                e
+            )
+        
+    async def get_token_for_connection(self, options: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Retrieves a token for a connection.
+        
+        Args:
+            options: Options for retrieving an access token for a connection.
+                Must include 'connection' and 'refresh_token' keys.
+                May optionally include 'login_hint'.
+        
+        Raises:
+            AccessTokenForConnectionError: If there was an issue requesting the access token.
+        
+        Returns:
+            Dictionary containing the token response with accessToken, expiresAt, and scope.
+        """
+        # Constants
+        SUBJECT_TYPE_REFRESH_TOKEN = "urn:ietf:params:oauth:token-type:refresh_token"
+        REQUESTED_TOKEN_TYPE_FEDERATED_CONNECTION_ACCESS_TOKEN = "http://auth0.com/oauth/token-type/federated-connection-access-token"
+        GRANT_TYPE_FEDERATED_CONNECTION_ACCESS_TOKEN = "urn:auth0:params:oauth:grant-type:token-exchange:federated-connection-access-token"
+        try:
+            # Ensure we have OIDC metadata
+            if not hasattr(self._oauth, "metadata") or not self._oauth.metadata:
+                self._oauth.metadata = await self._fetch_oidc_metadata(self._domain)
+            
+            token_endpoint = self._oauth.metadata.get("token_endpoint")
+            if not token_endpoint:
+                raise ApiError("configuration_error", "Token endpoint missing in OIDC metadata")
+            
+            # Prepare parameters
+            params = {
+                "connection": options["connection"],
+                "subject_token_type": SUBJECT_TYPE_REFRESH_TOKEN,
+                "subject_token": options["refresh_token"],
+                "requested_token_type": REQUESTED_TOKEN_TYPE_FEDERATED_CONNECTION_ACCESS_TOKEN,
+                "grant_type": GRANT_TYPE_FEDERATED_CONNECTION_ACCESS_TOKEN,
+                "client_id": self._client_id
+            }
+            
+            # Add login_hint if provided
+            if "login_hint" in options and options["login_hint"]:
+                params["login_hint"] = options["login_hint"]
+
+            # Make the request
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    token_endpoint, 
+                    data=params,
+                    auth=(self._client_id, self._client_secret)
+                )
+
+                if response.status_code != 200:
+                    error_data = response.json() if response.headers.get("content-type") == "application/json" else {}
+                    raise ApiError(
+                        error_data.get("error", "connection_token_error"),
+                        error_data.get("error_description", f"Failed to get token for connection: {response.status_code}")
+                    )
+                
+                token_endpoint_response = response.json()
+                
+                return {
+                    "access_token": token_endpoint_response.get("access_token"),
+                    "expires_at": int(time.time()) + int(token_endpoint_response.get("expires_in", 3600)),
+                    "scope": token_endpoint_response.get("scope", "")
+                }
+        
+        except Exception as e:
+            if isinstance(e, ApiError):
+                raise AccessTokenForConnectionError(
+                    AccessTokenForConnectionErrorCode.API_ERROR,
+                    str(e)
+                )
+            raise AccessTokenForConnectionError(
+                AccessTokenForConnectionErrorCode.FETCH_ERROR,
+                "There was an error while trying to retrieve an access token for a connection.",
                 e
             )

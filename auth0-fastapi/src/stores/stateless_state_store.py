@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 from fastapi import Request, Response
 from store.abstract import StateStore
 from auth_types import StateData
@@ -26,7 +26,7 @@ class StatelessStateStore(StateStore):
     async def set(
         self, 
         identifier: str, 
-        state: StateData,
+        state: Union[StateData, Dict[str, Any]],
         options: Optional[Dict[str, Any]] = None
     ) -> None:
         """
@@ -37,8 +37,12 @@ class StatelessStateStore(StateStore):
             raise ValueError("Response object is required in store options for stateless storage.")
         
         response: Response = options["response"]
-         # Encrypt the transaction data using the abstract store method:
-        encrypted_data = self.encrypt(identifier, state.dict())
+        if hasattr(state, 'dict') and callable(state.dict):
+            state_dict = state.dict()
+        else:
+            state_dict = state  
+        # Encrypt the transaction data using the abstract store method:
+        encrypted_data = self.encrypt(identifier, state_dict)
         # Calculate chunk size, ensuring space for the key name and additional characters
         chunk_size = self.max_cookie_size - len(self.cookie_name) - 10
         cookies = {}
@@ -61,7 +65,7 @@ class StatelessStateStore(StateStore):
         self, 
         identifier: str, 
         options: Optional[Dict[str, Any]] = None
-    ) -> Optional[StateData]:
+    ) -> Optional[Union[StateData, Dict[str, Any]]]:
         """
         Retrieves state data from the encrypted cookie.
         Expects 'request' in options.
@@ -88,22 +92,27 @@ class StatelessStateStore(StateStore):
         try:
             # Decrypt the stored value using the abstract store's decrypt method:
             decrypted_data = self.decrypt(identifier, full_encoded_data)
-            print(decrypted_data)
-            return StateData.parse_obj(decrypted_data)
+            return decrypted_data
         except Exception:
             return None
-
+        
     async def delete(
         self, 
         identifier: str, 
         options: Optional[Dict[str, Any]] = None
     ) -> None:
         """
-        Deletes the state cookie.
+        Deletes the state cookie and its chunks.
         Expects 'response' in options.
         """
         if options is None or "response" not in options:
             raise ValueError("Response object is required in store options for stateless storage.")
         
         response: Response = options["response"]
+        # Delete the base cookie if it exists
         response.delete_cookie(key=self.cookie_name)
+        
+        # Delete potential cookie chunks (assume a max number of chunks, e.g., 20)
+        for i in range(20):
+            chunk_key = f"{self.cookie_name}_{i}"
+            response.delete_cookie(key=chunk_key)

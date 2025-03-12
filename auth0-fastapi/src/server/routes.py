@@ -121,3 +121,62 @@ async def profile(request: Request, response:Response, auth_client: AuthClient =
         "user": user,
         "session": session
     }
+
+
+@router.get("/auth/token")
+async def get_token(request: Request, response: Response, auth_client: AuthClient = Depends(get_auth_client)):
+    # Prepare store_options with the Request object (used by the state store to read cookies)
+    store_options = {"request": request, "response": response}
+    try:
+        # Retrieve access token from the client
+        access_token = await auth_client.client.get_access_token(store_options=store_options)
+        
+        # You might want to include some basic information about the token
+        # without exposing the full token in the response
+        return {
+            "access_token_available": bool(access_token),
+            "access_token_preview": access_token[:10] + "..." if access_token else None,
+            "status": "success"
+        }
+    except Exception as e:
+        # Handle all errors with a single exception handler
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/auth/connection/{connection_name}")
+async def get_connection_token(
+    connection_name: str,
+    request: Request, 
+    response: Response, 
+    auth_client: AuthClient = Depends(get_auth_client),
+    login_hint: Optional[str] = None
+):
+    # Prepare store_options with the Request and Response objects
+    store_options = {"request": request, "response": response}
+    
+    try:
+        # Create connection options as a dictionary
+        connection_options = {
+            "connection": connection_name
+        }
+        
+        # Add login_hint if provided
+        if login_hint:
+            connection_options["login_hint"] = login_hint
+            
+        # Retrieve connection-specific access token
+        access_token = await auth_client.client.get_access_token_for_connection(
+            connection_options, 
+            store_options=store_options
+        )
+        
+        # Return a response with token information
+        return {
+            "connection": connection_name,
+            "access_token_available": bool(access_token),
+            "access_token_preview": access_token[:10] + "..." if access_token else None,
+            "status": "success"
+        }
+    except Exception as e:
+        # Handle all errors with a single exception handler
+        raise HTTPException(status_code=400, detail=str(e))

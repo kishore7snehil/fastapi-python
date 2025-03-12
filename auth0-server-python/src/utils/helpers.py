@@ -52,12 +52,17 @@ class State:
             Updated state data
         """
         current_time = int(time.time())
+
+        if state_data and hasattr(state_data, "dict") and callable(state_data.dict):
+            state_data_dict = state_data.dict()
+        else:
+            state_data_dict = state_data or {}
         
-        if state_data:
+        if state_data_dict:
             # Check if we need to add a new token set or update an existing one
             is_new_token_set = True
-            token_sets = state_data.get("token_sets", [])
-            
+            token_sets = state_data_dict.get("token_sets", [])
+                       
             for token_set in token_sets:
                 if (token_set.get("audience") == audience and 
                     token_set.get("scope") == token_endpoint_response.get("scope")):
@@ -82,12 +87,11 @@ class State:
                     else ts
                     for ts in token_sets
                 ]
-            
             # Return updated state data
             return {
-                **state_data,
+                **state_data_dict,
                 "id_token": token_endpoint_response.get("id_token"),
-                "refresh_token": token_endpoint_response.get("refresh_token") or state_data.get("refresh_token"),
+                "refresh_token": token_endpoint_response.get("refresh_token") or state_data_dict.get("refresh_token"),
                 "token_sets": token_sets
             }
         else:
