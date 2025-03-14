@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Request, Response, HTTPException, Depends
+from fastapi import APIRouter, Request, Response, HTTPException, Depends, Query
 from fastapi.responses import RedirectResponse
 from typing import Optional
 from auth.auth_client import AuthClient  # adjust relative import as needed
+from util import to_safe_redirect, create_route_url
 
 router = APIRouter()
 
@@ -104,6 +105,76 @@ async def backchannel_logout(request: Request, auth_client: AuthClient = Depends
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
     return Response(status_code=204)
+
+
+
+@router.get("/auth/connect")
+async def connect(request: Request, response: Response,  
+    connection: Optional[str] = Query(None),
+    connectionScope: Optional[str] = Query(None),
+    returnTo: Optional[str] = Query(None),
+    auth_client: AuthClient = Depends(get_auth_client)):
+
+    # Extract query parameters (connection, connectionScope, returnTo)
+    connection = connection or request.query_params.get("connection")
+    connection_scope = connectionScope or request.query_params.get("connectionScope")
+    dangerous_return_to = returnTo or request.query_params.get("returnTo")
+
+
+    if not connection:
+        raise HTTPException(
+            status_code=400,
+            detail="connection is not set"
+        )
+    
+    sanitized_return_to = to_safe_redirect(dangerous_return_to or "/", request.app.state.config.app_base_url)
+    
+    # Create the callback URL for linking
+    callback_path = "/auth/connect/callback"
+    redirect_uri = create_route_url(callback_path, request.app.state.config.app_base_url)
+    
+    # Call the startLinkUser method on our AuthClient. This method should accept parameters similar to:
+    # connection, connectionScope, authorizationParams (with redirect_uri), and appState.
+    link_user_url = await auth_client.start_link_user({
+        "connection": connection,
+        "connectionScope": connection_scope,
+        "authorization_params": {
+            "redirect_uri": str(redirect_uri)
+        },
+        "app_state": {
+            "returnTo": sanitized_return_to
+        }
+    }, store_options={"request": request, "response": response})
+
+    redirect_response = RedirectResponse(url=link_user_url)
+    if "set-cookie" in response.headers:
+        for cookie in response.headers.getlist("set-cookie"):
+            redirect_response.headers.append("set-cookie", cookie)
+    
+    return redirect_response
+
+@router.get("/auth/connect/callback")
+async def connect_callback(request: Request, response: Response, auth_client: AuthClient = Depends(get_auth_client)):
+    # Use the full URL from the callback
+    callback_url = str(request.url)
+    try:
+        result = await auth_client.complete_link_user(request, callback_url, store_options={"request": request, "response": response})
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    # Retrieve the returnTo parameter from appState if available
+    return_to = result.get("appState", {}).get("returnTo")
+    app_base_url = request.app.state.config.app_base_url
+
+    # Create a RedirectResponse and merge Set-Cookie headers from the original response
+    redirect_response = RedirectResponse(url=return_to or app_base_url)
+    # Merge cookie headers (if any) from `response`
+    if "set-cookie" in response.headers:
+        # If multiple Set-Cookie headers exist, they might be a list.
+        cookies = response.headers.getlist("set-cookie") if hasattr(response.headers, "getlist") else [response.headers["set-cookie"]]
+        for cookie in cookies:
+            redirect_response.headers.append("set-cookie", cookie)
+    return redirect_response
 
 #################### Testing Route ###################################
 @router.get("/auth/profile")

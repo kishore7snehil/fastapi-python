@@ -230,6 +230,9 @@ class ServerClient(Generic[TStoreOptions]):
         if not code:
             raise MissingRequiredArgumentError("code")
         
+        if not self._oauth.metadata or "token_endpoint" not in self._oauth.metadata:
+            self._oauth.metadata = await self._fetch_oidc_metadata(self._domain)
+
         # Exchange the code for tokens
         try:
             token_endpoint = self._oauth.metadata["token_endpoint"]
@@ -587,18 +590,18 @@ class ServerClient(Generic[TStoreOptions]):
         
         # Build the URL for user linking
         link_user_url = await self._build_link_user_url(
-            connection=options.connection,
-            connection_scope=options.connection_scope,
+            connection=options.get("connection"),
+            connection_scope=options.get("connectionScope"),
             id_token=state_data["id_token"],
             code_verifier=code_verifier,
             state=state,
-            authorization_params=options.authorization_params
+            authorization_params=options.get("authorization_params")
         )
         
         # Store transaction data
         transaction_data = TransactionData(
             code_verifier=code_verifier,
-            app_state=options.app_state
+            app_state=options.get("app_state")
         )
         
         await self._transaction_store.set(
@@ -612,6 +615,7 @@ class ServerClient(Generic[TStoreOptions]):
     async def complete_link_user(
         self,
         url: str,
+        request: Request=None,
         store_options: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
@@ -624,8 +628,9 @@ class ServerClient(Generic[TStoreOptions]):
         Returns:
             Dictionary containing the original app state
         """
+
         # We can reuse the interactive login completion since the flow is similar
-        result = await self.complete_interactive_login(url, store_options)
+        result = await self.complete_interactive_login(url, request, store_options)
         
         # Return just the app state as specified
         return {
@@ -658,13 +663,16 @@ class ServerClient(Generic[TStoreOptions]):
         
         # Build params
         params = {
+            "client_id": self._client_id,
             "code_challenge": code_challenge,
-            "code_challenge_method": "SH256",
+            "code_challenge_method": "S256",
             "state": state,
             "requested_connection": connection,
             "requested_connection_scope": connection_scope,
+            "response_type": "code",
             "id_token_hint": id_token,
-            "scope": "openid link_account",
+            "scope": "openid link_account offline_access",
+            "access_type": "offline",
             "prompt": "login"
         }
         

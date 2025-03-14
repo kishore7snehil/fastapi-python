@@ -74,3 +74,24 @@ class AuthClient:
         Processes a backchannel logout using the provided logout token.
         """
         return await self.client.handle_backchannel_logout(logout_token)
+    
+
+    async def start_link_user(self, options: dict, store_options: dict = None) -> str:
+        """
+        Initiates the user linking process.
+        Options should include:
+          - connection: connection identifier (e.g. 'google-oauth2')
+          - connectionScope: (optional) the scope for the connection
+          - authorizationParams: additional parameters for the /authorize call
+          - appState: any custom state to track (e.g., a returnTo URL)
+        Returns a URL to redirect the user to for linking.
+        """
+        return await self.client.start_link_user(options, store_options=store_options)
+    
+    async def complete_link_user(self, request: Request, url: str, store_options: dict = None) -> dict:
+        """
+        Completes the user linking process.
+        The provided URL should be the callback URL from Auth0.
+        Returns a dictionary containing the original appState.
+        """
+        return await self.client.complete_link_user(url, request, store_options=store_options)
